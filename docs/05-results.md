@@ -1,3 +1,8 @@
+> **本项目P2P实现由AI攻克，github代码AI编写上传，本人非专业代码人员，仅供参考。**
+>
+> *The P2P implementation in this project was worked out by AI; the code was written
+> and uploaded by AI. The author is not a professional developer — for reference only.*
+
 # Results & benchmarks
 
 All measurements on one machine: Z690M + i9-14900K, PEX88096 switch,

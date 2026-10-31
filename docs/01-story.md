@@ -1,3 +1,8 @@
+> **本项目P2P实现由AI攻克，github代码AI编写上传，本人非专业代码人员，仅供参考。**
+>
+> *The P2P implementation in this project was worked out by AI; the code was written
+> and uploaded by AI. The author is not a professional developer — for reference only.*
+
 # The story: six days, sixteen rounds, three false dawns
 
 Why a "simple P2P question" turned into a driver-archaeology expedition, and
