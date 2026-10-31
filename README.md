@@ -28,6 +28,20 @@ switch, three GPUs behind it: 1× RTX 3090 + 2× modded RTX 3080-20G. Kernel
 | llama.cpp 3-GPU decode (same-day A/B) | baseline | **+6.3%** |
 | llama.cpp 8.4K prefill | baseline | **+12.8%** |
 
+**Built on upstream work — credit where it is due.** The 615.71.09 driver we
+actually run is [noon-at-cgn/3080-20g-p2p](https://github.com/noon-at-cgn/3080-20g-p2p)
+(based on [NVIDIA/open-gpu-kernel-modules](https://github.com/NVIDIA/open-gpu-kernel-modules));
+the GA10x `0x610` ReBAR unlock for modded 3080-20G comes from
+[noon-at-cgn/3080-20gb-rebar](https://github.com/noon-at-cgn/3080-20gb-rebar), and the
+early-boot unlock module descends from the gpu_unlock / GFW vBIOS-unlock community;
+[aikitoria/open-gpu-kernel-modules](https://github.com/aikitoria/open-gpu-kernel-modules)
+(`-p2p`), [CachyOS-P2P-Nvidia](https://github.com/A1RM4X/CachyOS-P2P-Nvidia) and
+[consumer-multigpu-inference](https://github.com/eduardopessin/consumer-multigpu-inference)
+were surveyed as prior art; `kernel/` is derived from the Linux kernel (GPL-2.0);
+llama.cpp/ggml and the CUDA driver API carried the measurements. And the single idea
+that ended this hunt — *check switch-port ACS first* — is decade-old everyday knowledge
+in the VFIO/eGPU community. Full lineage and licenses: [THIRD_PARTY.md](THIRD_PARTY.md).
+
 Physical proof it isn't staging: the host round-trip ceiling on this box is
 12.55 GB/s (measured D2H/H2D pinned). Peer-on runs at 25–26 GB/s — you can't
 stage faster than the staging path's own limit.
@@ -112,6 +126,21 @@ ACSViol、没有 BlockedTLP、没有 Xid，`lspci -vvv` 在这类 Broadcom DSP �
 端口一条 `setpci` 写零。清零后：六对拷贝 25.6 GB/s 逐字节精确（此前 peer-on
 是 1.02 GB/s + 数据销毁）、SM 直访对端显存成立、NCCL 默认 direct-pointer
 跑通、生产推理 prefill +12.8%。
+
+**致谢（上游，缺一不可）**：本仓库是建立在别人成果之上的二次记录。实际运行的
+615.71.09 驱动来自 [noon-at-cgn/3080-20g-p2p](https://github.com/noon-at-cgn/3080-20g-p2p)，
+其基座是 [NVIDIA/open-gpu-kernel-modules](https://github.com/NVIDIA/open-gpu-kernel-modules)；
+魔改 3080-20G 的 `0x610` ReBAR 解锁知识来自
+[noon-at-cgn/3080-20gb-rebar](https://github.com/noon-at-cgn/3080-20gb-rebar)，
+initramfs 早期解锁模块承自 gpu_unlock / GFW vBIOS 解锁社区；
+[aikitoria/open-gpu-kernel-modules](https://github.com/aikitoria/open-gpu-kernel-modules)
+（`-p2p` 系列）、[CachyOS-P2P-Nvidia](https://github.com/A1RM4X/CachyOS-P2P-Nvidia)、
+[consumer-multigpu-inference](https://github.com/eduardopessin/consumer-multigpu-inference)
+是调研过的前作；`kernel/` 目录派生自 Linux 内核源码，按 GPL-2.0 流传；测量与
+验收依赖 llama.cpp/ggml 与 CUDA driver API。最后，让我们六天弯路终止的那一句
+「先查交换机端口的 ACS」，是 VFIO/eGPU 社区十年前的常识——本仓库存在的意义，
+就是把这句话往上挪进行业另一侧的检查清单。完整谱系与许可证见
+[THIRD_PARTY.md](THIRD_PARTY.md)。
 
 另外三件事值得带走：① `cudaMemcpyPeer` 不开 peer access 时的 ~10.8 GB/s
 是**主机中转**（本机中转上限实测 12.55），拿它当 P2P 证据的验收报告我们都
