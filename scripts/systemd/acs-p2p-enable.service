@@ -1,0 +1,14 @@
+[Unit]
+Description=Clear PCIe switch ACS so GPU P2P TLPs are not silently redirected
+After=systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+
+[Service]
+Type=oneshot
+# IMPORTANT — do NOT add RemainAfterExit=yes here.
+# A oneshot that stays "active" makes the timer's `start` a NO-OP: the timer
+# shows LAST-trigger timestamps, looks healthy, and never re-runs the script
+# (systemd starts only inactive/dead units). This exact bug silently disabled
+# re-assertion for days on our machine: after a switch reset restored factory
+# ACSCtl, P2P died and nothing re-healed it.
+ExecStart=/usr/local/sbin/acs-p2p-tool.sh enable

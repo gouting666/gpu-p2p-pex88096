@@ -1,0 +1,16 @@
+# probe binaries
+probes/probe_path
+probes/probe_pairs
+probes/probe_enable_check
+probes/probe_vmm
+probes/copy_hold
+probes/scan_bar1_fast
+*.o
+*.ko
+*.mod
+*.mod.c
+*.symvers
+*.order
+.tmp/
+state/
+*.log

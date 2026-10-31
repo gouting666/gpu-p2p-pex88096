@@ -1,0 +1,320 @@
+# nvbigbar v9 — early NVIDIA ReBAR expansion + aligned bridge-window sizing
+# Applies to: Linux 7.0.14 (Ubuntu 7.0.0 source tree), two files touched.
+#
+# WHY: cards whose vendor register (0x610 on GA10x) widens the ReBAR size table
+# only at runtime (modded 3080 20G) cannot get a 32G BAR1 from userspace: the
+# kernel allocates BAR resources during enumeration, before any initramfs hook
+# runs (0.29s vs 0.83s). This patch does the vendor-register unlock INSIDE
+# enumeration (probe.c, before pci_read_bases) and fixes bridge window sizing
+# so sibling windows packed behind a multi-level switch don't leave alignment
+# gaps (setup-bus.c).
+#
+# WHAT:
+#   probe.c     — cmdline token `nvbigbar=1`; for NVIDIA display devices that
+#                 lack ReBAR size bit15 (32G): write (v & ~0x0F80) | 0x0C80 to
+#                 vendor reg 0x610 (GA10x FB_SIZE_OVERRIDE), then re-init the
+#                 ReBAR cap. Cards that already advertise 32G (e.g. stock 3090)
+#                 are NOT touched.
+#   setup-bus.c — pbus_size_mem(): for non-pref window subtrees containing an
+#                 NVIDIA GPU, accumulate children as round_up(max(r_size,align),
+#                 align) and round the window size up to the max child align.
+#                 Fixes "can't assign; no space" for BAR0/BAR3/ROM siblings
+#                 behind a PEX88096-style 3-level switch. Never inflates sizes
+#                 beyond the aligned sum (v5's big_align*(n-1) approach blew up
+#                 96G->160G and is deliberately NOT used).
+#
+# DEFAULT OFF: without `nvbigbar=1` on the kernel cmdline behavior is stock.
+#
+# License: derived from the Linux kernel source, GPL-2.0.
+# Usage: cd linux-7.0.14 && patch -p1 < nvbigbar-v9-for-linux-7.0.14.patch
+# See docs/03-full-stack.md for the boot-gate + rollback recipe (this changes
+# allocation for ALL devices behind the switch; a failed pci=realloc pass can
+# leave every GPU with BARs=0 until cold power-cycle).
+--- a/drivers/pci/probe.c
++++ b/drivers/pci/probe.c
+@@ -23,6 +23,7 @@
+ #include <linux/irqdomain.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/bitfield.h>
++#include <linux/sizes.h>	/* 实验补丁: SZ_32G */
+ #include <trace/events/pci.h>
+ #include "pci.h"
+ 
+@@ -2013,6 +2014,116 @@
+  * Returns 0 on success and negative if unknown type of device (not normal,
+  * bridge or CardBus).
+  */
++/*
++ * ==== 实验补丁：NVIDIA ReBAR 提前放大（cmdline: nvbigbar=1）====
++ * 在内核读取 BAR 之前就把 ReBAR 请求尺寸设成 32G，让 pci_bus_size_bridges()
++ * 在枚举阶段按 32G 计算整条桥窗（配合 pci=realloc 才能把 root port 窗从
++ * BIOS 给的 33.8G 撑到能装下三张卡）。
++ * 原因：mod 20G 3080 的 vBIOS 把 ReBAR 尺寸表限到 256M，必须先写厂商寄存器
++ * 0x610 的 bits[12:7] = 0x0C80，尺寸表里才会出现 bit15（32G）。
++ * 默认关闭：不带 nvbigbar=1 时行为与官方内核完全一致。
++ */
++bool nvbigbar_enabled __ro_after_init;	/* 实验补丁 v5：setup-bus.c 也要看 */
++
++static int __init nvbigbar_setup(char *str)
++{
++	nvbigbar_enabled = true;
++	return 1;
++}
++__setup("nvbigbar", nvbigbar_setup);
++
++#define NV_REBAR_VENDOR_REG	0x610
++#define NV_REBAR_VENDOR_MASK	0x00000F80
++#define NV_REBAR_VENDOR_VAL	0x00000C80
++
++/*
++ * v7：把这些 GPU 里「非 VRAM 的小 pref BAR」（实测就是 32M 的 BAR3）的
++ * IORESOURCE_PREFETCH 清掉，让它走非 pref 的 64bit MMIO 窗。
++ *
++ * 原因：BAR1 放大到 32G 后，桥窗尺寸是「32G + 32M」，不是 32G 的整数倍。
++ * 分配器要求每个 32G BAR 落在 32G 边界上，于是这张卡的 32M BAR3 会把下一个
++ * 32G 对齐的兄弟窗整体顶高 32G —— 三张卡实际要 128G 跨度，98.4G 的空洞装不下，
++ * 3080 两个分支被回滚。把 32M 挪到非 pref 窗后，每卡恰好 32G，96G 紧挨着排即可。
++ */
++static void nvbigbar_depref(struct pci_dev *dev)
++{
++	int i;
++
++	if (!nvbigbar_enabled)
++		return;
++	if (dev->vendor != PCI_VENDOR_ID_NVIDIA)
++		return;
++	if ((dev->class >> 8) != PCI_CLASS_DISPLAY_VGA)
++		return;
++
++	for (i = 1; i < PCI_STD_NUM_BARS; i++) {
++		struct resource *r = &dev->resource[i];
++		resource_size_t size = resource_size(r);
++
++		if (!(r->flags & IORESOURCE_MEM) ||
++		    !(r->flags & IORESOURCE_PREFETCH))
++			continue;
++		if (size < SZ_1M || size >= SZ_1G)
++			continue;	/* BAR1（VRAM 窗）保持 pref */
++
++		r->flags &= ~IORESOURCE_PREFETCH;
++		dev_info(&dev->dev,
++			 "nvbigbar: BAR%d %lluMB 移出 pref 窗（走非 pref 64bit MMIO）\n",
++			 i, (unsigned long long)(size >> 20));
++	}
++}
++
++static void nvbigbar_preset(struct pci_dev *dev)
++{
++	u32 v;
++	int bar = 1, size;
++
++	if (!nvbigbar_enabled)
++		return;
++	if (dev->vendor != PCI_VENDOR_ID_NVIDIA)
++		return;
++	/*
++	 * dev->class 是 3 字节 (base,sub,prog-if)，而 pci_ids.h 里的
++	 * PCI_CLASS_DISPLAY_* 是 16 位 (base<<8|sub)。必须右移 8 位比较，
++	 * 否则恒不等 → 整个补丁静默跳过（第 3 版内核的根因）。
++	 */
++	if ((dev->class >> 8) != PCI_CLASS_DISPLAY_VGA &&
++	    (dev->class >> 8) != PCI_CLASS_DISPLAY_3D)
++		return;
++
++	pci_rebar_init(dev);
++	if (!dev->rebar_cap) {
++		dev_info(&dev->dev, "nvbigbar: %04x:%04x 无 ReBAR 扩展能力，跳过\n",
++			 dev->vendor, dev->device);
++		return;
++	}
++	dev_info(&dev->dev, "nvbigbar: 命中 %04x:%04x class %#08x rebar_cap %#x\n",
++		 dev->vendor, dev->device, dev->class, dev->rebar_cap);
++
++	size = pci_rebar_bytes_to_size(SZ_32G);
++	if (!pci_rebar_size_supported(dev, bar, size)) {
++		pci_read_config_dword(dev, NV_REBAR_VENDOR_REG, &v);
++		pci_write_config_dword(dev, NV_REBAR_VENDOR_REG,
++				       (v & ~NV_REBAR_VENDOR_MASK) |
++				       NV_REBAR_VENDOR_VAL);
++		if (!pci_rebar_size_supported(dev, bar, size)) {
++			size = pci_rebar_get_max_size(dev, bar);
++			if (size < 0)
++				return;
++			dev_warn(&dev->dev, "nvbigbar: 不支持 32G，改用编码 %d\n",
++				 size);
++		} else {
++			dev_info(&dev->dev, "nvbigbar: 0x610 %#010x 已放开尺寸表\n",
++				 v);
++		}
++	}
++
++	if (pci_rebar_set_size(dev, bar, size))
++		return;
++	dev_info(&dev->dev, "nvbigbar: BAR%d 请求 %lluMB（编码 %d）\n",
++		 bar, (u64)pci_rebar_size_to_bytes(size) >> 20, size);
++}
++
+ int pci_setup_device(struct pci_dev *dev)
+ {
+ 	u32 class;
+@@ -2108,8 +2219,10 @@
+ 	case PCI_HEADER_TYPE_NORMAL:		    /* standard header */
+ 		if (class == PCI_CLASS_BRIDGE_PCI)
+ 			goto bad;
++		nvbigbar_preset(dev);	/* 实验补丁：早于 BAR 读取 */
+ 		pci_read_irq(dev);
+ 		pci_read_bases(dev, PCI_STD_NUM_BARS, PCI_ROM_ADDRESS);
++		nvbigbar_depref(dev);	/* 实验补丁 v7：小 pref BAR 移出 pref 窗 */
+ 
+ 		pci_subsystem_ids(dev, &dev->subsystem_vendor, &dev->subsystem_device);
+ 
+--- a/drivers/pci/setup-bus.c
++++ b/drivers/pci/setup-bus.c
+@@ -31,6 +31,9 @@
+ #include <linux/acpi.h>
+ #include "pci.h"
+ 
++/* 实验补丁 v5：巨型 BAR 桥窗对齐空洞补偿 */
++extern bool nvbigbar_enabled;
++
+ #define PCI_RES_TYPE_MASK \
+ 	(IORESOURCE_IO | IORESOURCE_MEM | IORESOURCE_PREFETCH |\
+ 	 IORESOURCE_MEM_64)
+@@ -1258,6 +1261,27 @@
+ 	return true;
+ }
+ 
++/* 实验补丁 v8：判断 root port 之下是否挂着 NVIDIA VGA（防误伤 NVMe/网卡根端口） */
++static int nvbigbar_find_nv_gpu(struct pci_dev *dev, void *data)
++{
++	bool *found = data;
++
++	if (dev->vendor == PCI_VENDOR_ID_NVIDIA &&
++	    (dev->class >> 8) == PCI_CLASS_DISPLAY_VGA) {
++		*found = true;
++		return 1;
++	}
++	return 0;
++}
++
++static bool nvbigbar_bus_has_nv_gpu(struct pci_bus *bus)
++{
++	bool found = false;
++
++	pci_walk_bus(bus, nvbigbar_find_nv_gpu, &found);
++	return found;
++}
++
+ /**
+  * pbus_size_mem() - Size the memory window of a given bus
+  *
+@@ -1285,6 +1309,11 @@
+ 	int order, max_order;
+ 	resource_size_t children_add_size = 0;
+ 	resource_size_t add_align = 0;
++	resource_size_t big_align = 0;	/* 实验补丁 v5 */
++	int big_cnt = 0;		/* 实验补丁 v5 */
++	bool nv_pack = false;		/* 实验补丁 v9 */
++	resource_size_t nv_max_align = 0;	/* 实验补丁 v9 */
++	resource_size_t v9_old;		/* 实验补丁 v9 */
+ 
+ 	if (!b_res)
+ 		return;
+@@ -1295,6 +1324,10 @@
+ 
+ 	max_order = 0;
+ 	size = 0;
++	/* 实验补丁 v9：NV 子树的非 pref 窗，子资源按对齐上取整累加 */
++	nv_pack = nvbigbar_enabled && bus->self &&
++		  !(b_res->flags & IORESOURCE_PREFETCH) &&
++		  nvbigbar_bus_has_nv_gpu(bus);
+ 
+ 	list_for_each_entry(dev, &bus->devices, bus_list) {
+ 		struct resource *r;
+@@ -1331,7 +1364,16 @@
+ 				continue;
+ 
+ 			r_size = resource_size(r);
+-			size += max(r_size, align);
++			if (nv_pack) {	/* 实验补丁 v9 */
++				size += round_up(max(r_size, align), align);
++				nv_max_align = max(nv_max_align, align);
++			} else {
++				size += max(r_size, align);
++			}
++			if (nvbigbar_enabled && r_size > align && align >= SZ_4G) {
++				big_cnt++;
++				big_align = max(big_align, align);
++			}
+ 
+ 			/*
+ 			 * If resource's size is larger than its alignment,
+@@ -1349,9 +1391,68 @@
+ 	win_align = window_alignment(bus, b_res->flags);
+ 	min_align = calculate_head_align(aligns, max_order);
+ 	min_align = max(min_align, win_align);
++	if (nvbigbar_enabled && big_cnt >= 1) {
++		/*
++		 * v6：只把 min_align 抬到巨型窗的对齐，不再给「对齐跳空」补尺寸。
++		 *
++		 * v5 的 gap = big_align * (big_cnt - 1) 会逐层重复累加：子桥窗本身
++		 * 也是 r_size > align 的资源，于是每上一层都再补一份 32G。实测顶部
++		 * root port 被吹到 160G+，而 above-4G 孔径只有 256G 且被 iGPU 的
++		 * VF BAR2(0x4020000000-0x40ffffffff) 和 ixgbe pref 窗
++		 * (0x6842400000~) 切成 ~157G + ~150G 两段，32G 对齐下放不下，
++		 * 六次重试后整条链回滚，三张卡 BAR1 全变成 0（连 3090 的 32G 也丢），
++		 * nvidia 驱动直接 -1。真实需求只有 96G+96M，按原样申请即可。
++		 */
++		min_align = max(min_align, big_align);
++		pr_info("PCI: nvbigbar: %04x:%02x %pR 巨型窗 %d 个 align %lluMB 不补洞\n",
++			pci_domain_nr(bus), bus->number, b_res, big_cnt,
++			(unsigned long long)(big_align >> 20));
++	}
+ 	size0 = calculate_memsize(size, realloc_head ? 0 : add_size,
+ 				  0, win_align);
+ 
++	/* 实验补丁 v9：窗口自身对齐到最大子对齐，尺寸也取该对齐的整数倍 */
++	if (nv_pack && nv_max_align) {
++		v9_old = size0;
++		if (nv_max_align > min_align)
++			min_align = nv_max_align;
++		size0 = round_up(size0, nv_max_align);
++		if (size0 != v9_old)
++			pr_info("PCI: nvbigbar: %04x:%02x 非 pref 窗 %lluMB -> %lluMB（%lluMB 对齐）\n",
++				pci_domain_nr(bus), bus->number,
++				(unsigned long long)(v9_old >> 20),
++				(unsigned long long)(size0 >> 20),
++				(unsigned long long)(nv_max_align >> 20));
++	}
++
++	/*
++	 * 实验补丁 v8：含 NVIDIA 大 BAR 的 root port，非 pref 窗按「能给的
++	 * 上限」撑开，而不是按需求贴着算。
++	 *
++	 * v7 实测：32 位非 pref 根窗 80800000-bfffffff 共 1G，00:01.0 只分到
++	 * 148M（0x88000000-0x923fffff）。其中 3090 支占 0x89000000-0x8c0fffff
++	 * （49M）、12:00.0 占 0x8c100000（1M），剩 ~99M 却要放两张 3080 的
++	 * 98M 对齐块（BAR0 16M + BAR3 32M + ROM 0.5M + fn1 16K，需 32M 对齐
++	 * 的连续 98M）：起点只能落到 0x8e000000，仅剩 68M -> 0a:00.0 桥窗
++	 * failed -> 两卡 BAR0/BAR3 全灭，nvidia-smi 只剩 3090。
++	 * 而同一根窗内 0x92400000-bfffffff 这 732M 完全空闲（iomem 已验证）。
++	 * 撑到 896M（0x88000000-bfffffff 恰好装下）后，98M 块可落
++	 * 0x8e000000-0x93ffffff。
++	 */
++	if (nvbigbar_enabled && size0 && bus->self &&
++	    !(b_res->flags & IORESOURCE_PREFETCH) &&
++	    pci_is_root_bus(bus->parent) && nvbigbar_bus_has_nv_gpu(bus)) {
++		resource_size_t want = SZ_512M + SZ_256M + SZ_128M;
++
++		if (size0 < want) {
++			pr_info("PCI: nvbigbar: root port %04x:%02x 非 pref 窗 %lluMB -> %lluMB\n",
++				pci_domain_nr(bus), bus->number,
++				(unsigned long long)(size0 >> 20),
++				(unsigned long long)(want >> 20));
++			size0 = want;
++		}
++	}
++
+ 	if (size0) {
+ 		resource_set_range(b_res, min_align, size0);
+ 		b_res->flags &= ~IORESOURCE_DISABLED;

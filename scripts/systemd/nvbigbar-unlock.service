@@ -1,0 +1,12 @@
+[Unit]
+Description=Re-widen ReBAR table and set BAR1 32G decode on modded cards (after driver binds)
+After=systemd-modules-load.service nvidia-persistenced.service
+Wants=systemd-modules-load.service
+ConditionPathExists=/proc/driver/nvidia/version
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do [ -e /proc/driver/nvidia/version ] && break; sleep 1; done'
+ExecStart=/bin/sh -c 'sleep 2; NVBIGBAR_CARDS="0000:0c:00.0 0000:0d:00.0" /usr/local/sbin/nvbigbar-unlock.sh'
+# RemainAfterExit must stay NO (see acs-p2p-enable.service comment).
+RemainAfterExit=no

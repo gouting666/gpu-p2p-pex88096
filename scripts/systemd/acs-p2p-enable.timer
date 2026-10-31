@@ -1,0 +1,11 @@
+[Unit]
+Description=Re-assert switch ACS clear (switch reset / firmware reload reverts it)
+
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=60s
+AccuracySec=5s
+Unit=acs-p2p-enable.service
+
+[Install]
+WantedBy=timers.target
