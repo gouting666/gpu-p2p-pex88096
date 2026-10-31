@@ -116,8 +116,10 @@ ate ten rounds of debugging here (see docs/04).
 5. [Results & benchmarks](docs/05-results.md)
 6. [Dead ends, so you don't repeat them](docs/06-dead-ends.md)
 
-License: MIT (our scripts/docs); `kernel/` is derived from Linux and stays
-GPL-2.0. Third-party lineage and credits: [THIRD_PARTY.md](THIRD_PARTY.md).
+License: `LICENSE` is unmodified MIT and covers our docs, scripts and probes;
+`kernel/` is derived from the Linux kernel and stays **GPL-2.0** (see
+[THIRD_PARTY.md](THIRD_PARTY.md#what-the-license-file-actually-grants)).
+Third-party lineage and credits: [THIRD_PARTY.md](THIRD_PARTY.md).
 
 ---
 

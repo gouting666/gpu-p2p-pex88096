@@ -20,10 +20,3 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
----
-
-Exception: files under `kernel/` are derived from the Linux kernel source
-(drivers/pci/*) and are licensed under GPL-2.0. See the header of
-kernel/nvbigbar-v9-for-linux-7.0.14.patch.
-
-Probes under `probes/` use CUDA APIs; their license is MIT as above.

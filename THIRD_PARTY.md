@@ -38,6 +38,23 @@ mode of ReqRedir is engineered (by spec, not malice) to be invisible. If
 this repo does one thing, let it be moving that sentence one row up in the
 other community's checklist.
 
+## What the LICENSE file actually grants
+
+`LICENSE` is the **unmodified MIT text** — deliberately, because GitHub's license
+detector reports `NOASSERTION` the moment anything is appended to a template.
+Nothing is missing: the split below is the licensing, stated plainly.
+
+| Path | License | Why |
+|---|---|---|
+| everything in this repo | MIT | our docs, scripts, probes, notes |
+| `kernel/` | **GPL-2.0** | derived from Linux `drivers/pci/{probe,setup-bus}.c`; the notice is in the patch header |
+
+This is a statement about derivative works, not an extra clause: code derived
+from the Linux kernel is GPL-2.0 regardless of what this repo's `LICENSE` says,
+and the MIT grant simply does not reach that directory. Probes under `probes/`
+call the public CUDA driver/runtime APIs; using an API does not put its license
+into your source.
+
 ## A note on the modded hardware
 
 "3080-20G" boards are a Chinese-market VRAM mod of GA102 hardware; they're
