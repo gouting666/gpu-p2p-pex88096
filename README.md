@@ -118,3 +118,19 @@ ACSViol、没有 BlockedTLP、没有 Xid，`lspci -vvv` 在这类 Broadcom DSP �
 写过；② 「AER 零增量 + 无 Xid」不能证明 ACS 没挡路，重定向是合规动作；
 ③ systemd timer 重申 volatile 寄存器时，oneshot 服务带 `RemainAfterExit=yes`
 会让重申永远空转。详见 docs/，欢迎提 issue 补充你踩到的平台差异。
+
+### 中文：改哪些文件（速查）
+
+| 层 | 文件/键 | 谁需要 |
+|---|---|---|
+| BIOS | Above-4G decoding + ReBAR 开 | 所有人 |
+| 内核 | `kernel/nvbigbar-v9-for-linux-7.0.14.patch` + cmdline `nvbigbar=1 pci=realloc` | 仅 vBIOS 限制 ReBAR 的魔改卡 |
+| initramfs | gpu_unlock dkms + dracut pre-udev 钩子 | 魔改卡 |
+| 驱动 | 615.71.09（3080-20g-p2p 路线自编，装 `updates/`，脱离 apt）+ `/etc/modprobe.d` 三个 RegistryDwords 键 | 要 BAR1 P2P 的人 |
+| 交换机 | `scripts/acs-p2p-tool.sh enable` + systemd oneshot/60s timer | **所有带交换机的机器（真凶在这）** |
+| 引擎 | 删 `NCCL_P2P_DISABLE=1`；注意 `GGML_CUDA_P2P` 是「设了就开」 | llama.cpp/NCCL 用户 |
+
+注意（详见 docs/02、docs/04）：① 重定向不置错误位，「无 AER/无 Xid」不能排除 ACS；
+② peer-off 的 ~10.8 GB/s 是主机中转，验收必须 peer-on + 逐字节比对；
+③ oneshot 带 `RemainAfterExit=yes` 会让 60s 重申 timer 永远空转；
+④ 三态注册表键「删掉≠关闭」；⑤ 别手搓 peer PTE（会把显存偏移当主机物理地址写进内存）。
